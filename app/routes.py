@@ -75,25 +75,28 @@ def film_episodes(film: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def public_episode(episode: dict[str, Any]) -> dict[str, Any]:
+    unlocked = episode_is_unlocked(episode)
     return {
         "episode_id": episode.get("episode_id"),
         "episode": episode.get("episode"),
         "title": episode.get("title"),
-        "is_vip": episode.get("is_vip", 0),
+        "is_vip": 1 if episode_is_paid(episode) else 0,
         "price": episode.get("price", 0),
-        "is_unlocked": episode.get("is_unlocked", 1),
+        "is_unlocked": 1 if unlocked else 0,
+        "unlock_required": not unlocked,
         "is_publish": episode.get("is_publish", 1),
         "is_like": episode.get("is_like", 0),
     }
 
 
 def playback_episode(episode: dict[str, Any]) -> dict[str, Any]:
+    unlocked = episode_is_unlocked(episode)
     return {
         **public_episode(episode),
         "playback": {
-            "hls_url": episode.get("link"),
-            "backup_hls_url": episode.get("backup_link"),
-            "subtitles": episode.get("subtitles") if isinstance(episode.get("subtitles"), dict) else {},
+            "hls_url": episode.get("link") if unlocked else "",
+            "backup_hls_url": episode.get("backup_link") if unlocked else "",
+            "subtitles": episode.get("subtitles") if unlocked and isinstance(episode.get("subtitles"), dict) else {},
         },
     }
 
@@ -128,6 +131,44 @@ def bool_state(value: object) -> bool | None:
         if normalized in {"0", "false", "no"}:
             return False
     return None
+
+
+def int_value(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return value.strip().isdigit() and int(value.strip()) or default
+    return default
+
+
+def episode_number_value(episode: dict[str, Any]) -> int:
+    return int_value(episode.get("episode") or episode.get("episode_number") or episode.get("number"), 1)
+
+
+def episode_is_paid(episode: dict[str, Any]) -> bool:
+    is_vip = next(
+        (parsed for key in ("is_vip", "vip", "is_paid") if (parsed := bool_state(episode.get(key))) is not None),
+        False,
+    )
+    price = next(
+        (parsed for key in ("price", "coin_price", "unlock_price") if (parsed := int_value(episode.get(key), -1)) >= 0),
+        0,
+    )
+    return bool(is_vip) or price > 0
+
+
+def episode_is_unlocked(episode: dict[str, Any]) -> bool:
+    explicit = next(
+        (parsed for key in ("is_unlocked", "unlocked") if (parsed := bool_state(episode.get(key))) is not None),
+        None,
+    )
+    if explicit is not None:
+        return explicit
+    if episode_number_value(episode) <= 1:
+        return True
+    return not episode_is_paid(episode)
 
 
 def _state_set(state: dict[str, Any], key: str) -> set[Any]:
@@ -574,8 +615,7 @@ async def client_play_episode(film_id: FilmId, episode_number: EpisodeRef, reque
 
     current_index = episodes.index(episode)
     next_episode = episodes[current_index + 1] if current_index + 1 < len(episodes) else None
-    is_paid = bool(episode.get("is_vip")) or int(episode.get("price") or 0) > 0
-    unlocked = episode.get("is_unlocked", 1) == 1 or not is_paid
+    unlocked = episode_is_unlocked(episode)
 
     return JSONResponse(
         {
@@ -583,7 +623,10 @@ async def client_play_episode(film_id: FilmId, episode_number: EpisodeRef, reque
             "film": {
                 "id": film.get("id"),
                 "title": film.get("title"),
+                "description": film.get("description") or film.get("desc") or film.get("summary") or film.get("content"),
                 "thumb": film.get("thumb"),
+                "rating": film.get("rating"),
+                "genre": film.get("genre") or film.get("category") or film.get("tag"),
                 "episode_total": film.get("episode_total") or len(episodes),
             },
             "episode": playback_episode(episode),
@@ -654,8 +697,7 @@ async def client_unlock_film_episode(film_id: FilmId, episode_number: EpisodeRef
             status_code=404,
         )
 
-    is_paid = bool(episode.get("is_vip")) or int(episode.get("price") or 0) > 0
-    is_unlocked = episode.get("is_unlocked", 1) == 1 or not is_paid
+    is_unlocked = episode_is_unlocked(episode)
     if is_unlocked:
         return JSONResponse(
             {
