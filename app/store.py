@@ -47,6 +47,9 @@ class StateStore:
     async def save_watch_progress(self, device_id: str, film_id: int, episode_ref: int, progress: JsonMap) -> None:
         raise NotImplementedError
 
+    async def list_watch_progress(self, device_id: str) -> list[JsonMap]:
+        raise NotImplementedError
+
     async def save_event(self, device_id: str, event_type: str, payload: JsonMap) -> None:
         raise NotImplementedError
 
@@ -110,6 +113,15 @@ class MemoryStateStore(StateStore):
                 "episode": episode_ref,
                 "updated_at": utc_now_iso(),
             }
+
+    async def list_watch_progress(self, device_id: str) -> list[JsonMap]:
+        async with self._lock:
+            rows = [
+                dict(progress)
+                for progress in self._watch_progress.values()
+                if progress.get("device_id") == device_id
+            ]
+        return sorted(rows, key=lambda progress: str(progress.get("updated_at", "")), reverse=True)
 
     async def save_event(self, device_id: str, event_type: str, payload: JsonMap) -> None:
         async with self._lock:
@@ -194,6 +206,16 @@ class FirestoreStateStore(StateStore):
                 "updated_at": utc_now_iso(),
             },
             merge=True,
+        )
+
+    async def list_watch_progress(self, device_id: str) -> list[JsonMap]:
+        query = self._collection("watch_progress").where("device_id", "==", device_id)
+        snapshots = await self._to_thread(lambda: list(query.stream()))
+        rows = [snapshot.to_dict() for snapshot in snapshots]
+        return sorted(
+            [row for row in rows if isinstance(row, dict)],
+            key=lambda progress: str(progress.get("updated_at", "")),
+            reverse=True,
         )
 
     async def save_event(self, device_id: str, event_type: str, payload: JsonMap) -> None:

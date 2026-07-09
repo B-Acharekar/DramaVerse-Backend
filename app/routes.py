@@ -933,7 +933,42 @@ async def client_following(request: Request) -> JSONResponse:
 
 @router.get("/client/history/watch", tags=["Library"], summary="Watch history", dependencies=DEVICE_AUTH)
 async def client_watch_history(request: Request) -> Response:
-    return await proxy_request(request, "app", "api/history_watching_film")
+    device_id = await extract_device_id(request)
+    progress_rows = await state_store.list_watch_progress(device_id)
+    items: list[dict[str, Any]] = []
+    seen_films: set[int] = set()
+    for progress in progress_rows:
+        film_id = int_value(progress.get("film_id"), 0)
+        if film_id == 0 or film_id in seen_films:
+            continue
+        seen_films.add(film_id)
+        film_payload = await proxy_json(request, "app", "api/info_film", {"film_id": film_id})
+        film = film_payload.get("data") if isinstance(film_payload.get("data"), dict) else {}
+        if not film:
+            continue
+        episode = int_value(progress.get("episode"), 1)
+        duration_seconds = int_value(progress.get("duration_seconds"), 0)
+        progress_seconds = int_value(progress.get("progress_seconds"), 0)
+        items.append(
+            {
+                "film": {
+                    "id": film.get("id") or film_id,
+                    "title": film.get("title"),
+                    "description": film.get("description") or film.get("desc") or film.get("summary") or film.get("content"),
+                    "thumb": film.get("thumb"),
+                    "rating": film.get("rating"),
+                    "genre": film.get("genre") or film.get("category") or film.get("tag"),
+                    "episode_total": film.get("episode_total") or len(film_episodes(film)),
+                },
+                "film_id": film_id,
+                "episode": episode,
+                "progress_seconds": progress_seconds,
+                "duration_seconds": duration_seconds,
+                "completed": bool_state(progress.get("completed")) or False,
+                "updated_at": progress.get("updated_at"),
+            }
+        )
+    return JSONResponse({"status": True, "data": items})
 
 
 @router.get("/client/history/follow", tags=["Library"], summary="Follow history", dependencies=DEVICE_AUTH)
