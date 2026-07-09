@@ -90,13 +90,12 @@ def public_episode(episode: dict[str, Any]) -> dict[str, Any]:
 
 
 def playback_episode(episode: dict[str, Any]) -> dict[str, Any]:
-    unlocked = episode_is_unlocked(episode)
     return {
         **public_episode(episode),
         "playback": {
-            "hls_url": episode.get("link") if unlocked else "",
-            "backup_hls_url": episode.get("backup_link") if unlocked else "",
-            "subtitles": episode.get("subtitles") if unlocked and isinstance(episode.get("subtitles"), dict) else {},
+            "hls_url": episode.get("link"),
+            "backup_hls_url": episode.get("backup_link"),
+            "subtitles": episode.get("subtitles") if isinstance(episode.get("subtitles"), dict) else {},
         },
     }
 
