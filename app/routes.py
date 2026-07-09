@@ -459,6 +459,9 @@ async def client_update_me(request: Request) -> Response:
 
 @router.post("/client/feedback", tags=["User"], summary="Send user feedback", dependencies=DEVICE_AUTH)
 async def client_feedback(request: Request) -> Response:
+    device_id = await extract_device_id(request)
+    payload = await request_json_body_for_event(request)
+    persist_in_background(state_store.save_feedback(device_id, payload))
     return await proxy_request(request, "app", "api/user/user_feedback")
 
 

@@ -50,6 +50,9 @@ class StateStore:
     async def save_event(self, device_id: str, event_type: str, payload: JsonMap) -> None:
         raise NotImplementedError
 
+    async def save_feedback(self, device_id: str, payload: JsonMap) -> None:
+        raise NotImplementedError
+
 
 def empty_engagement_state() -> JsonMap:
     return {
@@ -114,6 +117,17 @@ class MemoryStateStore(StateStore):
                 {
                     "device_id": device_id,
                     "event_type": event_type,
+                    "payload": payload,
+                    "created_at": utc_now_iso(),
+                }
+            )
+
+    async def save_feedback(self, device_id: str, payload: JsonMap) -> None:
+        async with self._lock:
+            self._events.append(
+                {
+                    "device_id": device_id,
+                    "event_type": "feedback",
                     "payload": payload,
                     "created_at": utc_now_iso(),
                 }
@@ -189,6 +203,16 @@ class FirestoreStateStore(StateStore):
                 "device_id": device_id,
                 "event_type": event_type,
                 "payload": payload,
+                "created_at": utc_now_iso(),
+            },
+        )
+
+    async def save_feedback(self, device_id: str, payload: JsonMap) -> None:
+        await self._to_thread(
+            self._collection("feedback").document().set,
+            {
+                "device_id": device_id,
+                **payload,
                 "created_at": utc_now_iso(),
             },
         )
