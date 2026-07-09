@@ -650,17 +650,15 @@ async def client_watch_episode(
     request: Request,
 ) -> Response:
     device_id = await extract_device_id(request)
-    persist_in_background(
-        state_store.save_watch_progress(
-            device_id,
-            film_id,
-            episode_number,
-            {
-                "progress_seconds": progress.progress_seconds,
-                "duration_seconds": progress.duration_seconds,
-                "completed": progress.completed,
-            },
-        )
+    await state_store.save_watch_progress(
+        device_id,
+        film_id,
+        episode_number,
+        {
+            "progress_seconds": progress.progress_seconds,
+            "duration_seconds": progress.duration_seconds,
+            "completed": progress.completed,
+        },
     )
     payload = await proxy_json(request, "app", "api/info_film", {"film_id": film_id})
     film = payload.get("data") if isinstance(payload.get("data"), dict) else {}
