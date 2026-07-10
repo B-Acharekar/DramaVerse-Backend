@@ -1307,6 +1307,13 @@ async def client_read_notification(notification_id: str, request: Request) -> JS
     return JSONResponse({"status": True, "data": {"id": notification_id, "read": True}})
 
 
+@router.delete("/client/notifications", tags=["Notifications"], summary="Clear in-app notifications", dependencies=DEVICE_AUTH)
+async def client_clear_notifications(request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    await state_store.clear_notifications(device_id)
+    return JSONResponse({"status": True, "unread_count": 0, "data": []})
+
+
 @router.get("/client/rewards", tags=["Rewards"], summary="Reward wallet and missions", dependencies=DEVICE_AUTH)
 async def client_rewards(request: Request) -> JSONResponse:
     device_id = await extract_device_id(request)

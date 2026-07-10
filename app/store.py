@@ -75,6 +75,9 @@ class StateStore:
     async def mark_notification_read(self, device_id: str, notification_id: str) -> None:
         raise NotImplementedError
 
+    async def clear_notifications(self, device_id: str) -> None:
+        raise NotImplementedError
+
     async def get_rewards(self, device_id: str) -> JsonMap:
         raise NotImplementedError
 
@@ -212,6 +215,12 @@ class MemoryStateStore(StateStore):
             key = f"{device_id}:{notification_id}"
             if key in self._notifications:
                 self._notifications[key] = {**self._notifications[key], "read": True}
+
+    async def clear_notifications(self, device_id: str) -> None:
+        async with self._lock:
+            keys = [key for key, item in self._notifications.items() if item.get("device_id") == device_id]
+            for key in keys:
+                self._notifications.pop(key, None)
 
     async def get_rewards(self, device_id: str) -> JsonMap:
         async with self._lock:
@@ -355,6 +364,12 @@ class FirestoreStateStore(StateStore):
             {"read": True, "updated_at": utc_now_iso()},
             merge=True,
         )
+
+    async def clear_notifications(self, device_id: str) -> None:
+        query = self._collection("notifications").where("device_id", "==", device_id)
+        snapshots = await self._to_thread(lambda: list(query.stream()))
+        for snapshot in snapshots:
+            await self._to_thread(snapshot.reference.delete)
 
     async def get_rewards(self, device_id: str) -> JsonMap:
         snapshot = await self._to_thread(self._collection("rewards").document(safe_doc_id(device_id)).get)
