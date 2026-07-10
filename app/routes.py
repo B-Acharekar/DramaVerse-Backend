@@ -1094,7 +1094,7 @@ WATCH_TASKS = [
     {"id": "watch_10", "title": "Watch 10 minutes", "target_minutes": 10, "reward": 20},
     {"id": "watch_15", "title": "Watch 15 minutes", "target_minutes": 15, "reward": 30},
 ]
-SPIN_REWARDS = [10, 15, 20, 30, 40, 60, 100, 150]
+SPIN_REWARDS = [0, 10, 15, 20, 30, 40, 60, 100]
 
 
 def reward_day_key() -> str:
@@ -1122,6 +1122,8 @@ def reward_payload(device_id: str, rewards: dict[str, Any]) -> dict[str, Any]:
     current_day = min(max(current_day, 1), 7)
     last_claimed_check_in_day = int_value(rewards.get("last_claimed_check_in_day"), 0)
     last_spin_week = rewards.get("last_spin_week")
+    last_spin_reward = int_value(rewards.get("last_spin_reward"), 0)
+    spin_index = SPIN_REWARDS.index(last_spin_reward) if last_spin_reward in SPIN_REWARDS else 0
     watch_minutes = int_value(rewards.get("watch_minutes_today"), 0) if rewards.get("watch_minutes_day") == today else 0
     return {
         **rewards,
@@ -1133,8 +1135,19 @@ def reward_payload(device_id: str, rewards: dict[str, Any]) -> dict[str, Any]:
             {
                 "day": index + 1,
                 "reward": reward,
-                "claimed": rewards.get("last_check_in") == today and index + 1 == last_claimed_check_in_day,
+                "claimed": (
+                    index + 1 < current_day
+                    or (rewards.get("last_check_in") == today and index + 1 <= last_claimed_check_in_day)
+                ),
                 "current": rewards.get("last_check_in") != today and index + 1 == current_day,
+                "status": (
+                    "claimed"
+                    if index + 1 < current_day
+                    or (rewards.get("last_check_in") == today and index + 1 <= last_claimed_check_in_day)
+                    else "today"
+                    if rewards.get("last_check_in") != today and index + 1 == current_day
+                    else "locked"
+                ),
             }
             for index, reward in enumerate(CHECK_IN_REWARDS)
         ],
@@ -1151,12 +1164,14 @@ def reward_payload(device_id: str, rewards: dict[str, Any]) -> dict[str, Any]:
             "available": last_spin_week != reward_week_key(),
             "week_key": reward_week_key(),
             "segments": SPIN_REWARDS,
+            "selected_index": spin_index if last_spin_week == reward_week_key() else None,
+            "last_reward": last_spin_reward if last_spin_week == reward_week_key() else None,
         },
         "rules": [
             "Balance starts at 0 coins.",
             "Daily check-in starts at +20 coins, increases through day 7, then resets to day 1.",
             "Daily watch tasks rotate every day and reward coins after the required watch time.",
-            "Spin wheel can be used once per week.",
+            "Spin wheel can be used once per week and may land on Better luck next time.",
         ],
     }
 
@@ -1339,7 +1354,8 @@ async def client_reward_action(action: RewardActionRequest, request: Request) ->
             seed = sum(ord(char) for char in f"{device_id}:{week}")
             earned = SPIN_REWARDS[seed % len(SPIN_REWARDS)]
             rewards["last_spin_week"] = week
-            message = f"Weekly spin reward: +{earned} coins."
+            rewards["last_spin_reward"] = earned
+            message = f"Weekly spin reward: +{earned} coins." if earned else "Better luck next time."
         else:
             message = "Weekly spin already used."
     elif action.action == "watch_minutes":
