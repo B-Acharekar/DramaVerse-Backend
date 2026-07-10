@@ -56,6 +56,30 @@ class StateStore:
     async def save_feedback(self, device_id: str, payload: JsonMap) -> None:
         raise NotImplementedError
 
+    async def list_planner_items(self, device_id: str) -> list[JsonMap]:
+        raise NotImplementedError
+
+    async def save_planner_item(self, device_id: str, item: JsonMap) -> JsonMap:
+        raise NotImplementedError
+
+    async def delete_planner_item(self, device_id: str, item_id: str) -> None:
+        raise NotImplementedError
+
+    async def list_notifications(self, device_id: str) -> list[JsonMap]:
+        raise NotImplementedError
+
+    async def save_notification(self, device_id: str, payload: JsonMap) -> JsonMap:
+        raise NotImplementedError
+
+    async def mark_notification_read(self, device_id: str, notification_id: str) -> None:
+        raise NotImplementedError
+
+    async def get_rewards(self, device_id: str) -> JsonMap:
+        raise NotImplementedError
+
+    async def save_rewards(self, device_id: str, rewards: JsonMap) -> None:
+        raise NotImplementedError
+
 
 def empty_engagement_state() -> JsonMap:
     return {
@@ -74,6 +98,9 @@ class MemoryStateStore(StateStore):
         self._tokens: dict[str, str] = {}
         self._engagement: dict[str, JsonMap] = {}
         self._watch_progress: dict[str, JsonMap] = {}
+        self._planner: dict[str, JsonMap] = {}
+        self._notifications: dict[str, JsonMap] = {}
+        self._rewards: dict[str, JsonMap] = {}
         self._events: list[JsonMap] = []
         self._lock = asyncio.Lock()
 
@@ -144,6 +171,55 @@ class MemoryStateStore(StateStore):
                     "created_at": utc_now_iso(),
                 }
             )
+
+    async def list_planner_items(self, device_id: str) -> list[JsonMap]:
+        async with self._lock:
+            rows = [dict(item) for item in self._planner.values() if item.get("device_id") == device_id]
+        return sorted(rows, key=lambda item: str(item.get("scheduled_at", "")))
+
+    async def save_planner_item(self, device_id: str, item: JsonMap) -> JsonMap:
+        item_id = str(item.get("id") or safe_doc_id(f"{device_id}:{item.get('film_id')}:{item.get('scheduled_at')}"))
+        row = {**item, "id": item_id, "device_id": device_id, "updated_at": utc_now_iso()}
+        async with self._lock:
+            self._planner[f"{device_id}:{item_id}"] = row
+        return dict(row)
+
+    async def delete_planner_item(self, device_id: str, item_id: str) -> None:
+        async with self._lock:
+            self._planner.pop(f"{device_id}:{item_id}", None)
+
+    async def list_notifications(self, device_id: str) -> list[JsonMap]:
+        async with self._lock:
+            rows = [dict(item) for item in self._notifications.values() if item.get("device_id") == device_id]
+        return sorted(rows, key=lambda item: str(item.get("created_at", "")), reverse=True)
+
+    async def save_notification(self, device_id: str, payload: JsonMap) -> JsonMap:
+        notification_id = str(payload.get("id") or safe_doc_id(f"{device_id}:{utc_now_iso()}:{payload.get('title')}"))
+        row = {
+            **payload,
+            "id": notification_id,
+            "device_id": device_id,
+            "read": bool(payload.get("read", False)),
+            "created_at": payload.get("created_at") or utc_now_iso(),
+        }
+        async with self._lock:
+            self._notifications[f"{device_id}:{notification_id}"] = row
+        return dict(row)
+
+    async def mark_notification_read(self, device_id: str, notification_id: str) -> None:
+        async with self._lock:
+            key = f"{device_id}:{notification_id}"
+            if key in self._notifications:
+                self._notifications[key] = {**self._notifications[key], "read": True}
+
+    async def get_rewards(self, device_id: str) -> JsonMap:
+        async with self._lock:
+            rewards = self._rewards.setdefault(device_id, default_rewards_state(device_id))
+            return dict(rewards)
+
+    async def save_rewards(self, device_id: str, rewards: JsonMap) -> None:
+        async with self._lock:
+            self._rewards[device_id] = {**rewards, "device_id": device_id, "updated_at": utc_now_iso()}
 
 
 @dataclass
@@ -238,6 +314,72 @@ class FirestoreStateStore(StateStore):
                 "created_at": utc_now_iso(),
             },
         )
+
+    async def list_planner_items(self, device_id: str) -> list[JsonMap]:
+        query = self._collection("planner").where("device_id", "==", device_id)
+        snapshots = await self._to_thread(lambda: list(query.stream()))
+        rows = [snapshot.to_dict() for snapshot in snapshots]
+        return sorted([row for row in rows if isinstance(row, dict)], key=lambda item: str(item.get("scheduled_at", "")))
+
+    async def save_planner_item(self, device_id: str, item: JsonMap) -> JsonMap:
+        item_id = str(item.get("id") or safe_doc_id(f"{device_id}:{item.get('film_id')}:{item.get('scheduled_at')}"))
+        row = {**item, "id": item_id, "device_id": device_id, "updated_at": utc_now_iso()}
+        await self._to_thread(self._collection("planner").document(item_id).set, row, merge=True)
+        return row
+
+    async def delete_planner_item(self, device_id: str, item_id: str) -> None:
+        await self._to_thread(self._collection("planner").document(item_id).delete)
+
+    async def list_notifications(self, device_id: str) -> list[JsonMap]:
+        query = self._collection("notifications").where("device_id", "==", device_id)
+        snapshots = await self._to_thread(lambda: list(query.stream()))
+        rows = [snapshot.to_dict() for snapshot in snapshots]
+        return sorted([row for row in rows if isinstance(row, dict)], key=lambda item: str(item.get("created_at", "")), reverse=True)
+
+    async def save_notification(self, device_id: str, payload: JsonMap) -> JsonMap:
+        notification_id = str(payload.get("id") or safe_doc_id(f"{device_id}:{utc_now_iso()}:{payload.get('title')}"))
+        row = {
+            **payload,
+            "id": notification_id,
+            "device_id": device_id,
+            "read": bool(payload.get("read", False)),
+            "created_at": payload.get("created_at") or utc_now_iso(),
+        }
+        await self._to_thread(self._collection("notifications").document(notification_id).set, row, merge=True)
+        return row
+
+    async def mark_notification_read(self, device_id: str, notification_id: str) -> None:
+        await self._to_thread(
+            self._collection("notifications").document(notification_id).set,
+            {"read": True, "updated_at": utc_now_iso()},
+            merge=True,
+        )
+
+    async def get_rewards(self, device_id: str) -> JsonMap:
+        snapshot = await self._to_thread(self._collection("rewards").document(safe_doc_id(device_id)).get)
+        data = snapshot.to_dict() if snapshot.exists else None
+        return data if isinstance(data, dict) else default_rewards_state(device_id)
+
+    async def save_rewards(self, device_id: str, rewards: JsonMap) -> None:
+        await self._to_thread(
+            self._collection("rewards").document(safe_doc_id(device_id)).set,
+            {**rewards, "device_id": device_id, "updated_at": utc_now_iso()},
+            merge=True,
+        )
+
+
+def default_rewards_state(device_id: str) -> JsonMap:
+    return {
+        "device_id": device_id,
+        "coins": 1240,
+        "vip": False,
+        "check_in_day": 4,
+        "last_check_in": None,
+        "spin_available": 1,
+        "watch_minutes_today": 22,
+        "achievements": ["drama_king", "top_fan"],
+        "actions": [],
+    }
 
 
 def build_state_store() -> StateStore:

@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
-from app.schemas import DeviceAuthRequest, WatchProgressRequest
+from app.schemas import DeviceAuthRequest, NotificationRequest, PlannerItemRequest, RewardActionRequest, WatchProgressRequest
 from app.store import state_store, state_store_backend, state_store_error
 from app.upstream import capture_device_session, device_id_for_wrapper_token, extract_device_id, get_device_session, proxy_request
 
@@ -1121,6 +1121,124 @@ async def client_toggle_reminder(request: Request) -> Response:
 @router.get("/client/reminders", tags=["Reminders"], summary="User reminders", dependencies=DEVICE_AUTH)
 async def client_reminders(request: Request) -> JSONResponse:
     return await reminders_response(request)
+
+
+@router.get("/client/planner", tags=["Planner"], summary="Drama planner items", dependencies=DEVICE_AUTH)
+async def client_planner(request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    return JSONResponse({"status": True, "data": await state_store.list_planner_items(device_id)})
+
+
+@router.post("/client/planner", tags=["Planner"], summary="Create or update a drama planner item", dependencies=DEVICE_AUTH)
+async def client_save_planner_item(item: PlannerItemRequest, request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    saved = await state_store.save_planner_item(
+        device_id,
+        {
+            "film_id": item.film_id,
+            "title": item.title,
+            "episode": item.episode,
+            "scheduled_at": item.scheduled_at,
+            "note": item.note,
+            "image_url": item.image_url,
+            "remind_before_minutes": item.remind_before_minutes,
+        },
+    )
+    # Planner items are mirrored into notifications so the home bell has immediate in-app state.
+    await state_store.save_notification(
+        device_id,
+        {
+            "title": "Drama planned",
+            "body": f"{item.title} is scheduled for {item.scheduled_at}",
+            "type": "planner",
+            "metadata": {"planner_id": saved["id"], "film_id": item.film_id},
+        },
+    )
+    return JSONResponse({"status": True, "data": saved})
+
+
+@router.delete("/client/planner/{item_id}", tags=["Planner"], summary="Delete a drama planner item", dependencies=DEVICE_AUTH)
+async def client_delete_planner_item(item_id: str, request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    await state_store.delete_planner_item(device_id, item_id)
+    return JSONResponse({"status": True, "data": {"id": item_id}})
+
+
+@router.get("/client/notifications", tags=["Notifications"], summary="In-app notifications", dependencies=DEVICE_AUTH)
+async def client_notifications(request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    notifications = await state_store.list_notifications(device_id)
+    return JSONResponse(
+        {
+            "status": True,
+            "unread_count": sum(1 for item in notifications if not bool_state(item.get("read"))),
+            "data": notifications,
+        }
+    )
+
+
+@router.post("/client/notifications", tags=["Notifications"], summary="Track a notification", dependencies=DEVICE_AUTH)
+async def client_save_notification(notification: NotificationRequest, request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    saved = await state_store.save_notification(
+        device_id,
+        {
+            "title": notification.title,
+            "body": notification.body,
+            "type": notification.type,
+            "metadata": notification.metadata,
+        },
+    )
+    return JSONResponse({"status": True, "data": saved})
+
+
+@router.post("/client/notifications/{notification_id}/read", tags=["Notifications"], summary="Mark notification read", dependencies=DEVICE_AUTH)
+async def client_read_notification(notification_id: str, request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    await state_store.mark_notification_read(device_id, notification_id)
+    return JSONResponse({"status": True, "data": {"id": notification_id, "read": True}})
+
+
+@router.get("/client/rewards", tags=["Rewards"], summary="Reward wallet and missions", dependencies=DEVICE_AUTH)
+async def client_rewards(request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    rewards = await state_store.get_rewards(device_id)
+    coin_packages = await proxy_json(request, "web", "payment/coin_packages")
+    subscription_packages = await proxy_json(request, "web", "payment/subscription_packages")
+    return JSONResponse(
+        {
+            "status": True,
+            "data": {
+                **rewards,
+                "coin_packages": coin_packages.get("data", coin_packages),
+                "subscription_packages": subscription_packages.get("data", subscription_packages),
+            },
+        }
+    )
+
+
+@router.post("/client/rewards/action", tags=["Rewards"], summary="Track reward action", dependencies=DEVICE_AUTH)
+async def client_reward_action(action: RewardActionRequest, request: Request) -> JSONResponse:
+    device_id = await extract_device_id(request)
+    rewards = await state_store.get_rewards(device_id)
+    actions = rewards.get("actions") if isinstance(rewards.get("actions"), list) else []
+    if action.action == "daily_check_in":
+        rewards["check_in_day"] = (int_value(rewards.get("check_in_day"), 0) % 7) + 1
+        rewards["last_check_in"] = action.metadata.get("checked_at")
+    if action.amount > 0:
+        rewards["coins"] = int_value(rewards.get("coins"), 0) + action.amount
+    rewards["actions"] = actions + [{"action": action.action, "amount": action.amount, "metadata": action.metadata}]
+    await state_store.save_rewards(device_id, rewards)
+    await state_store.save_notification(
+        device_id,
+        {
+            "title": "Reward claimed",
+            "body": f"+{action.amount} coins added to your balance." if action.amount else "Reward activity tracked.",
+            "type": "reward",
+            "metadata": {"action": action.action},
+        },
+    )
+    return JSONResponse({"status": True, "data": rewards})
 
 
 @router.get("/client/payments/packages/coins", tags=["Payments"], summary="Coin packages", dependencies=DEVICE_AUTH)
