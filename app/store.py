@@ -371,13 +371,16 @@ class FirestoreStateStore(StateStore):
 def default_rewards_state(device_id: str) -> JsonMap:
     return {
         "device_id": device_id,
-        "coins": 1240,
+        "coins": 0,
         "vip": False,
-        "check_in_day": 4,
+        "check_in_day": 1,
         "last_check_in": None,
+        "last_spin_week": None,
+        "claimed_task_day": None,
+        "claimed_tasks": [],
         "spin_available": 1,
-        "watch_minutes_today": 22,
-        "achievements": ["drama_king", "top_fan"],
+        "watch_minutes_today": 0,
+        "achievements": [],
         "actions": [],
     }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 import json
 import os
 from typing import Annotated
@@ -672,6 +673,13 @@ async def client_watch_episode(
             "completed": progress.completed,
         },
     )
+    rewards = await state_store.get_rewards(device_id)
+    rewards["watch_minutes_today"] = max(
+        int_value(rewards.get("watch_minutes_today"), 0),
+        int((progress.progress_seconds or 0) / 60),
+    )
+    rewards["watch_minutes_day"] = reward_day_key()
+    await state_store.save_rewards(device_id, rewards)
     payload = await proxy_json(request, "app", "api/info_film", {"film_id": film_id})
     film = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     episode = find_episode(film_episodes(film), episode_number)
@@ -1080,33 +1088,76 @@ async def reminders_response(request: Request) -> JSONResponse:
     return JSONResponse({"status": True, "message": payload.get("message"), "data": reminders})
 
 
-def package_data_or_default(payload: dict[str, Any], default: list[dict[str, Any]]) -> Any:
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if isinstance(data, list) and data:
-        return data
-    if isinstance(data, dict) and data:
-        return data
-    if isinstance(payload, dict) and payload:
-        return payload
-    return default
+CHECK_IN_REWARDS = [20, 25, 30, 35, 40, 45, 60]
+WATCH_TASKS = [
+    {"id": "watch_5", "title": "Watch 5 minutes", "target_minutes": 5, "reward": 15},
+    {"id": "watch_10", "title": "Watch 10 minutes", "target_minutes": 10, "reward": 20},
+    {"id": "watch_15", "title": "Watch 15 minutes", "target_minutes": 15, "reward": 30},
+]
+SPIN_REWARDS = [10, 15, 20, 30, 40, 60, 100, 150]
 
 
-def default_coin_packages() -> list[dict[str, Any]]:
-    return [
-        {"title": "50 Coins", "coins": 50, "price": "$0.99"},
-        {"title": "100 Coins", "coins": 100, "price": "$1.99"},
-        {"title": "250 Coins", "coins": 250, "price": "$4.99"},
-        {"title": "500 Coins", "coins": 500, "price": "$8.99"},
-        {"title": "1000 Coins Pack", "coins": 1000, "price": "$14.99", "best_value": True},
-    ]
+def reward_day_key() -> str:
+    return datetime.now(UTC).date().isoformat()
 
 
-def default_subscription_packages() -> list[dict[str, Any]]:
-    return [
-        {"title": "Monthly", "price": "$10.99", "period": "month"},
-        {"title": "Yearly", "price": "$100.99", "period": "year", "best_value": True},
-        {"title": "Weekly", "price": "$4.99", "period": "week"},
-    ]
+def reward_week_key() -> str:
+    now = datetime.now(UTC).isocalendar()
+    return f"{now.year}-W{now.week}"
+
+
+def daily_tasks_for_device(device_id: str) -> list[dict[str, Any]]:
+    offset = sum(ord(char) for char in f"{device_id}:{reward_day_key()}") % len(WATCH_TASKS)
+    ordered = WATCH_TASKS[offset:] + WATCH_TASKS[:offset]
+    return [dict(task) for task in ordered]
+
+
+def reward_payload(device_id: str, rewards: dict[str, Any]) -> dict[str, Any]:
+    today = reward_day_key()
+    claimed_task_day = rewards.get("claimed_task_day")
+    claimed_tasks = rewards.get("claimed_tasks") if claimed_task_day == today else []
+    if not isinstance(claimed_tasks, list):
+        claimed_tasks = []
+    current_day = int_value(rewards.get("check_in_day"), 1) or 1
+    current_day = min(max(current_day, 1), 7)
+    last_spin_week = rewards.get("last_spin_week")
+    watch_minutes = int_value(rewards.get("watch_minutes_today"), 0) if rewards.get("watch_minutes_day") == today else 0
+    return {
+        **rewards,
+        "coins": int_value(rewards.get("coins"), 0),
+        "check_in_day": current_day,
+        "last_check_in": rewards.get("last_check_in"),
+        "can_check_in": rewards.get("last_check_in") != today,
+        "check_in_rewards": [
+            {
+                "day": index + 1,
+                "reward": reward,
+                "claimed": rewards.get("last_check_in") == today and index + 1 == current_day,
+                "current": index + 1 == current_day,
+            }
+            for index, reward in enumerate(CHECK_IN_REWARDS)
+        ],
+        "daily_tasks": [
+            {
+                **task,
+                "progress_minutes": watch_minutes,
+                "completed": watch_minutes >= int_value(task.get("target_minutes"), 0),
+                "claimed": task["id"] in claimed_tasks,
+            }
+            for task in daily_tasks_for_device(device_id)
+        ],
+        "spin": {
+            "available": last_spin_week != reward_week_key(),
+            "week_key": reward_week_key(),
+            "segments": SPIN_REWARDS,
+        },
+        "rules": [
+            "Balance starts at 0 coins.",
+            "Daily check-in starts at +20 coins, increases through day 7, then resets to day 1.",
+            "Daily watch tasks rotate every day and reward coins after the required watch time.",
+            "Spin wheel can be used once per week.",
+        ],
+    }
 
 
 @router.get(
@@ -1244,18 +1295,7 @@ async def client_read_notification(notification_id: str, request: Request) -> JS
 async def client_rewards(request: Request) -> JSONResponse:
     device_id = await extract_device_id(request)
     rewards = await state_store.get_rewards(device_id)
-    coin_packages = await optional_proxy_json(request, "web", "payment/coin_packages")
-    subscription_packages = await optional_proxy_json(request, "web", "payment/subscription_packages")
-    return JSONResponse(
-        {
-            "status": True,
-            "data": {
-                **rewards,
-                "coin_packages": package_data_or_default(coin_packages, default_coin_packages()),
-                "subscription_packages": package_data_or_default(subscription_packages, default_subscription_packages()),
-            },
-        }
-    )
+    return JSONResponse({"status": True, "data": reward_payload(device_id, rewards)})
 
 
 @router.post("/client/rewards/action", tags=["Rewards"], summary="Track reward action", dependencies=DEVICE_AUTH)
@@ -1263,32 +1303,61 @@ async def client_reward_action(action: RewardActionRequest, request: Request) ->
     device_id = await extract_device_id(request)
     rewards = await state_store.get_rewards(device_id)
     actions = rewards.get("actions") if isinstance(rewards.get("actions"), list) else []
+    today = reward_day_key()
+    week = reward_week_key()
+    earned = 0
+    message = "Reward activity tracked."
     if action.action == "daily_check_in":
-        rewards["check_in_day"] = (int_value(rewards.get("check_in_day"), 0) % 7) + 1
-        rewards["last_check_in"] = action.metadata.get("checked_at")
-    if action.amount > 0:
-        rewards["coins"] = int_value(rewards.get("coins"), 0) + action.amount
-    rewards["actions"] = actions + [{"action": action.action, "amount": action.amount, "metadata": action.metadata}]
+        if rewards.get("last_check_in") != today:
+            current_day = min(max(int_value(rewards.get("check_in_day"), 1), 1), 7)
+            earned = CHECK_IN_REWARDS[current_day - 1]
+            rewards["last_check_in"] = today
+            rewards["check_in_day"] = 1 if current_day >= 7 else current_day + 1
+            message = f"Daily check-in claimed: +{earned} coins."
+        else:
+            message = "Daily check-in already claimed today."
+    elif action.action == "daily_task":
+        task_id = str(action.metadata.get("task_id", ""))
+        task = next((item for item in WATCH_TASKS if item["id"] == task_id), None)
+        claimed_tasks = rewards.get("claimed_tasks") if rewards.get("claimed_task_day") == today else []
+        if not isinstance(claimed_tasks, list):
+            claimed_tasks = []
+        watch_minutes = int_value(rewards.get("watch_minutes_today"), 0) if rewards.get("watch_minutes_day") == today else 0
+        if task and task_id not in claimed_tasks and watch_minutes >= int_value(task["target_minutes"], 0):
+            earned = int_value(task["reward"], 0)
+            rewards["claimed_task_day"] = today
+            rewards["claimed_tasks"] = claimed_tasks + [task_id]
+            message = f"Daily task claimed: +{earned} coins."
+        elif task_id in claimed_tasks:
+            message = "Daily task already claimed."
+        else:
+            message = "Daily task is not complete yet."
+    elif action.action == "weekly_spin":
+        if rewards.get("last_spin_week") != week:
+            seed = sum(ord(char) for char in f"{device_id}:{week}")
+            earned = SPIN_REWARDS[seed % len(SPIN_REWARDS)]
+            rewards["last_spin_week"] = week
+            message = f"Weekly spin reward: +{earned} coins."
+        else:
+            message = "Weekly spin already used."
+    elif action.action == "watch_minutes":
+        minutes = int_value(action.metadata.get("minutes"), 0)
+        rewards["watch_minutes_today"] = max(int_value(rewards.get("watch_minutes_today"), 0), minutes)
+        message = "Watch progress updated."
+    if earned > 0:
+        rewards["coins"] = int_value(rewards.get("coins"), 0) + earned
+    rewards["actions"] = actions + [{"action": action.action, "amount": earned, "metadata": action.metadata, "created_at": today}]
     await state_store.save_rewards(device_id, rewards)
     await state_store.save_notification(
         device_id,
         {
             "title": "Reward claimed",
-            "body": f"+{action.amount} coins added to your balance." if action.amount else "Reward activity tracked.",
+            "body": f"+{earned} coins added to your balance." if earned else message,
             "type": "reward",
             "metadata": {"action": action.action},
         },
     )
-    return JSONResponse(
-        {
-            "status": True,
-            "data": {
-                **rewards,
-                "coin_packages": default_coin_packages(),
-                "subscription_packages": default_subscription_packages(),
-            },
-        }
-    )
+    return JSONResponse({"status": True, "message": message, "data": reward_payload(device_id, rewards)})
 
 
 @router.get("/client/payments/packages/coins", tags=["Payments"], summary="Coin packages", dependencies=DEVICE_AUTH)
