@@ -15,6 +15,7 @@ load_env_file()
 JsonMap = dict[str, Any]
 state_store_backend = "memory"
 state_store_error: str | None = None
+REWARD_ECONOMY_VERSION = 2
 
 
 def utc_now_iso() -> str:
@@ -371,6 +372,7 @@ class FirestoreStateStore(StateStore):
 def default_rewards_state(device_id: str) -> JsonMap:
     return {
         "device_id": device_id,
+        "economy_version": REWARD_ECONOMY_VERSION,
         "coins": 0,
         "vip": False,
         "check_in_day": 1,
