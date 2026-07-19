@@ -50,7 +50,7 @@ GOOGLE_APPLICATION_CREDENTIALS=C:\secure\firebase-service-account.json
 FIRESTORE_COLLECTION_PREFIX=dramaverse
 ```
 
-The service account should have Cloud Firestore read/write access. The app writes to prefixed collections such as `dramaverse_device_sessions`, `dramaverse_wrapper_tokens`, `dramaverse_engagement`, `dramaverse_watch_progress`, and `dramaverse_events`.
+`GOOGLE_APPLICATION_CREDENTIALS`, `FIREBASE_CREDS`, or `FIREBASE_CREDENTIALS` can contain either a path to the service account JSON file or the pasted service account JSON object directly. The service account should have Cloud Firestore read/write access. The app writes to prefixed collections such as `dramaverse_device_sessions`, `dramaverse_wrapper_tokens`, `dramaverse_engagement`, `dramaverse_watch_progress`, and `dramaverse_events`.
 
 Network calls remain async. Firestore's sync SDK is isolated with `asyncio.to_thread`, and progress/event writes are dispatched in background tasks so client screens do not wait on analytics or persistence writes.
 

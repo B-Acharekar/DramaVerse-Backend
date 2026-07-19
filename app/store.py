@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from app.env import load_env_file
@@ -16,6 +18,11 @@ JsonMap = dict[str, Any]
 state_store_backend = "memory"
 state_store_error: str | None = None
 REWARD_ECONOMY_VERSION = 2
+FIREBASE_CREDENTIAL_ENV_NAMES = (
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "FIREBASE_CREDS",
+    "FIREBASE_CREDENTIALS",
+)
 
 
 def utc_now_iso() -> str:
@@ -402,6 +409,46 @@ def default_rewards_state(device_id: str) -> JsonMap:
     }
 
 
+def _credential_env_value() -> tuple[str, str] | None:
+    for env_name in FIREBASE_CREDENTIAL_ENV_NAMES:
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return env_name, value
+    return None
+
+
+def _load_firestore_credentials() -> tuple[Any | None, str | None]:
+    source = _credential_env_value()
+    if not source:
+        return None, None
+
+    env_name, value = source
+    try:
+        from google.oauth2 import service_account
+    except ImportError as exc:
+        raise RuntimeError("google-auth service account support is not installed") from exc
+
+    if value.startswith("{"):
+        try:
+            service_account_info = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{env_name} contains invalid service account JSON") from exc
+    else:
+        credential_path = Path(value).expanduser()
+        if credential_path.is_file():
+            credentials = service_account.Credentials.from_service_account_file(str(credential_path))
+            return credentials, credentials.project_id
+        if env_name == "GOOGLE_APPLICATION_CREDENTIALS":
+            return None, None
+        raise ValueError(f"{env_name} must contain service account JSON or a path to a JSON file")
+
+    if not isinstance(service_account_info, dict):
+        raise ValueError(f"{env_name} must contain a JSON object")
+
+    credentials = service_account.Credentials.from_service_account_info(service_account_info)
+    return credentials, credentials.project_id or service_account_info.get("project_id")
+
+
 def build_state_store() -> StateStore:
     global state_store_backend, state_store_error
     use_firestore = os.getenv("FIRESTORE_ENABLED", "").lower() in {"1", "true", "yes"} or bool(
@@ -419,12 +466,15 @@ def build_state_store() -> StateStore:
         state_store_error = "google-cloud-firestore is not installed"
         return MemoryStateStore()
 
-    project = os.getenv("FIREBASE_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or None
-    database = os.getenv("FIRESTORE_DATABASE")
-    client_kwargs = {"project": project} if project else {}
-    if database:
-        client_kwargs["database"] = database
     try:
+        credentials, credentials_project = _load_firestore_credentials()
+        project = os.getenv("FIREBASE_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT") or credentials_project or None
+        database = os.getenv("FIRESTORE_DATABASE")
+        client_kwargs = {"project": project} if project else {}
+        if credentials:
+            client_kwargs["credentials"] = credentials
+        if database:
+            client_kwargs["database"] = database
         client = firestore.Client(**client_kwargs)
     except Exception as exc:
         state_store_backend = "memory"

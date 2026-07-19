@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
+from app import store
 from app.main import app
 from app.upstream import (
     build_upstream_url,
@@ -168,6 +172,36 @@ class WrapperTests(unittest.TestCase):
         self.assertTrue(episode_is_unlocked(episodes[0]))
         self.assertFalse(episode_is_unlocked(episodes[1]))
         self.assertTrue(episode_is_unlocked(episodes[2]))
+
+    def test_firestore_credentials_accept_raw_json_env(self):
+        credentials = Mock(project_id="json-project")
+        service_account_json = '{"type":"service_account","project_id":"json-project"}'
+
+        with patch.dict(os.environ, {"FIREBASE_CREDS": service_account_json}, clear=True):
+            with patch(
+                "google.oauth2.service_account.Credentials.from_service_account_info",
+                return_value=credentials,
+            ) as from_info:
+                parsed_credentials, project_id = store._load_firestore_credentials()
+
+        self.assertIs(parsed_credentials, credentials)
+        self.assertEqual(project_id, "json-project")
+        from_info.assert_called_once_with({"type": "service_account", "project_id": "json-project"})
+
+    def test_firestore_credentials_accept_json_file_path_env(self):
+        credentials = Mock(project_id="file-project")
+
+        with tempfile.NamedTemporaryFile(suffix=".json") as service_account_file:
+            with patch.dict(os.environ, {"FIREBASE_CREDS": service_account_file.name}, clear=True):
+                with patch(
+                    "google.oauth2.service_account.Credentials.from_service_account_file",
+                    return_value=credentials,
+                ) as from_file:
+                    parsed_credentials, project_id = store._load_firestore_credentials()
+
+        self.assertIs(parsed_credentials, credentials)
+        self.assertEqual(project_id, "file-project")
+        from_file.assert_called_once_with(service_account_file.name)
 
 
 def asyncio_run(awaitable):
